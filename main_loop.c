@@ -58,7 +58,7 @@ static void timer_next(struct timeval *tv)
       }
     }
 
-    //find minmum timeout timer
+    //find minimum timeout timer
     list_for_each_entry(h,&g_timer_head,list){
       if(h->ptr){
         e = (event_t*)h->ptr;
