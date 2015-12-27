@@ -289,7 +289,7 @@ int ml_dispatch_event()
 
         //pick next expired time
         timer_next(&tv);
-        printf("picked:%d,%d\n",tv.tv_sec,tv.tv_usec);
+        //printf("picked:%d,%d\n",tv.tv_sec,tv.tv_usec);
         if((ret = select(g_max_fd + 1,&read_set,&write_set,NULL,&tv)) < 0){
           if (errno != EINTR) {
             printf("select error");

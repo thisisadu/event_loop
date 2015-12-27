@@ -14,14 +14,14 @@ typedef void (*callback_t)(event_t *evt);
 //该结构体字段仅内部用，不要直接访问
 struct tag_event
 {
-    int flag;
+    int flag;//flag
     int fd;//fd
     int secs;//seconds
     int usecs;//useconds
     struct timeval timeout;//expire use
     callback_t proc;//callback function
-    void *arg;
-    void *ptr;
+    void *arg;//point to user data
+    void *ptr;//point to list element
 };
 
 void ml_init();
