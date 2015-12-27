@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <sys/time.h>
 #include <time.h>
+#include <errno.h>
 #include "list.h"
 
 typedef struct tag_event event_t;
@@ -17,8 +18,10 @@ struct tag_event
     int fd;//fd
     int secs;//seconds
     int usecs;//useconds
+    struct timeval timeout;//expire use
     callback_t proc;//callback function
     void *arg;
+    void *ptr;
 };
 
 void ml_init();
@@ -40,5 +43,7 @@ void ml_add_event(event_t *evt);
 void ml_del_event(event_t *evt);
 
 int ml_dispatch_event();
+
+void ml_dispatch_cancel();
 
 #endif//__MAIN_LOOP__
