@@ -1,57 +1,64 @@
-#ifndef ELOOP_H
-#define ELOOP_H
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#ifndef __ELOOP__
+#define __ELOOP__
+#include <stdlib.h>
 #include <stdio.h>
-#include <string.h>
+#include <sys/time.h>
+#include <sys/select.h>
 #include <time.h>
-#include "list.h"
+#include <errno.h>
+#include "xlist.h"
 
-/*socket 可用时处理函数*/
-typedef void (*proc_t)(void* data);
+//#define ELOOP_DEBUG_OPEN 1
 
-/*a list element never delete by others*/
-typedef struct element
+/*事件循环，每个线程定义一个*/
+typedef struct
 {
-    struct list_head list;
-    void *ptr;
-}element_t;
-
-/*fd节点*/
-typedef struct node
-{
-    int fd;
-    proc_t proc;
-    void *data;
-}node_t;
-
-/*定时器*/
-typedef struct timer
-{
-    int secs;
-    proc_t proc;
-    void *data;
-    int left;
-}ttimer_t;
-
-typedef struct eloop
-{
-    fd_set readfd;
-    struct timeval timeout;
-    struct list_head fds;
-    struct list_head timers;
-    int max_fd;
-    int looping;
+  struct list_head timer_head;
+  struct list_head read_head;
+  struct list_head write_head;
+  fd_set read_set;
+  fd_set write_set;
+  int max_fd;
+  int runing;
 }eloop_t;
 
-void eloop_init(eloop_t* el);
-void eloop_add_node(eloop_t* el,node_t *node);
-void eloop_del_node(eloop_t* el,node_t *node);
-void eloop_add_timer(eloop_t* el,ttimer_t *timer);
-void eloop_modify_timer(eloop_t* el,ttimer_t *timer);
-void eloop_del_timer(eloop_t* el,ttimer_t *timer);
-void eloop_run(eloop_t* el);
-void eloop_cancel(eloop_t* el);
+typedef struct tag_event event_t;
 
-#endif // ELOOP_H
+typedef void (*callback_t)(event_t *evt);
+
+//该结构体字段仅内部用，不要直接访问
+struct tag_event
+{
+    int flag;//flag
+    int fd;//fd
+    int secs;//seconds
+    int usecs;//useconds
+    struct timeval timeout;//expire use
+    callback_t proc;//callback function
+    void *arg;//point to user data
+    void *ptr;//point to list element
+};
+
+void e_init_read_event(event_t *evt,int fd,callback_t fn,void *arg);
+
+void e_init_write_event(event_t *evt,int fd,callback_t fn,void *arg);
+
+void e_init_timer_event(event_t *evt,int secs,int usecs,callback_t fn,void *arg);
+
+void* e_get_event_arg(event_t *evt);
+
+int  e_get_event_fd(event_t *evt);
+
+void e_init(eloop_t* loop);
+
+void e_mod_timer_event(eloop_t* loop,event_t *evt,int secs,int usecs);
+
+void e_add_event(eloop_t* loop,event_t *evt);
+
+void e_del_event(eloop_t* loop,event_t *evt);
+
+int  e_dispatch_event(eloop_t* loop);
+
+void e_dispatch_cancel(eloop_t* loop);
+
+#endif//__ELOOP__

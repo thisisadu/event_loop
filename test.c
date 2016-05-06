@@ -4,61 +4,49 @@
 
 eloop_t e_demo; //thread local data
 
-void timer_proc(void *data)
+void timer_proc(event_t *evt)
 {
 	static int count = 0;
-	ttimer_t *timer = (ttimer_t *)data;
 
 	printf("count:%d\n",count);
 
 	/*delete timer*/	
 	if(count++ == 10)
 	{
-		//only can be called in own thread
-		eloop_del_timer(&e_demo,timer);
-		/*break eloop,can be called in own or other thread*/
-		eloop_cancel(&e_demo);
+		e_del_event(&e_demo,evt);
+		e_dispatch_cancel(&e_demo);
 	}
 }
 
-void fd_proc(void *data)
+void fd_proc(event_t *evt)
 {
-	node_t *node = (node_t *)data;
-
+	int fd = e_get_event_fd(evt);
+	int *p = (int*)e_get_event_arg(evt);
 	
-	//only can be called in own thread
-	eloop_del_node(&e_demo,node);
-	close(node->fd);
+	e_del_event(&e_demo,evt);
+	close(fd);
 }
 
 
 int main(int argc,char**argv)
 {
-	node_t node;
-	ttimer_t timer;
+	event_t node;
+	event_t timer;
+	int arg;
 
 	/*初始化事件循环*/
-	eloop_init(&e_demo);
+	e_init(&e_demo);
 
-	/*int fd = socket();
+	int fd = socket();
+	e_init_read_event(&node,fd,fd_proc,&arg);
 
-	node.fd = fd;
-	node.proc = fd_proc;
+	e_init_timer_event(&timer,3,0,timer_proc,NULL);
 
-	//only can be called in own thread
-	eloop_add_node(&e_demo,&node);
-	*/
-	
+	e_add_event(&e_demo,&node);
 
-	timer.secs = 1;//unit: seconds
-	timer.proc = timer_proc;
-	timer.data = NULL;//extra data
+	e_add_event(&e_demo,&timer);
 
-	//only can be called in own thread
-	eloop_add_timer(&e_demo,&timer);
-
-	/*run to select*/
-	eloop_run(&e_demo);
+	e_dispatch_event(&e_demo);
 
 	return 0;
 }
