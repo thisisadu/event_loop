@@ -1,3 +1,4 @@
+#include <string.h>
 #include "eloop.h"
 
 #define F_TIMER	0x01
@@ -13,7 +14,6 @@ typedef struct
 
 //for debug
 #ifdef ELOOP_DEBUG_OPEN
-#include "sdk_syslog.h"
 static void print_count(eloop_t *loop)
 {
   hold_t *h;
@@ -37,7 +37,7 @@ static void print_count(eloop_t *loop)
       }
   }
 
-  SDK_LOG_DEBUG("^^^^^^^^^^^^^^^^^loop:%p,timers:%d,read_fds:%d,write_fds:%d^^^^^^^^^^^^^^^^^^\n",loop,timers,read_fds,write_fds);
+  printf("^^^^^^^^^^^^^^^^^loop:%p,timers:%d,read_fds:%d,write_fds:%d^^^^^^^^^^^^^^^^^^\n",loop,timers,read_fds,write_fds);
 }
 #endif
 
@@ -118,6 +118,30 @@ static void clean_list(struct list_head *head)
         list_del(&h->list);
         free(h);
     }
+}
+
+static void print_error_fds(struct list_head *r_head,struct list_head *w_head,fd_set *fds)
+{
+  hold_t *h;
+  event_t *e;
+
+  list_for_each_entry(h,r_head,list){
+    if(h->ptr){
+      e = (event_t*)h->ptr;
+      if(FD_ISSET(e->fd,fds)){
+        printf("fd %d error in read set\n",e->fd);
+      }
+    }
+  }
+
+  list_for_each_entry(h,w_head,list){
+    if(h->ptr){
+      e = (event_t*)h->ptr;
+      if(FD_ISSET(e->fd,fds)){
+        printf("fd %d error in write set\n",e->fd);
+      }
+    }
+  }
 }
 
 static void process_fds(struct list_head *rw_head,fd_set *fds,fd_set *origin)
@@ -212,6 +236,7 @@ void* e_get_event_arg(event_t *e)
 
 void e_init(eloop_t* loop)
 {
+    memset(loop,0,sizeof(*loop));
     INIT_LIST_HEAD(&loop->timer_head);
     INIT_LIST_HEAD(&loop->read_head);
     INIT_LIST_HEAD(&loop->write_head);
@@ -306,15 +331,17 @@ void e_mod_timer_event(eloop_t* loop,event_t *e,int secs,int usecs)
 
 int e_dispatch_event(eloop_t* loop)
 {
-    int ret;
+    int ret = 0;
     fd_set read_set;
     fd_set write_set;
+    fd_set error_set;
     struct timeval tv;
 
     loop->runing = 1;
 
     while(loop->runing){
         //assign fds
+        FD_ZERO(&error_set);
         read_set = loop->read_set;
         write_set = loop->write_set;
 
@@ -324,10 +351,12 @@ int e_dispatch_event(eloop_t* loop)
         //pick next expired time
         timer_next(loop,&tv);
         //printf("picked:%d,%d\n",tv.tv_sec,tv.tv_usec);
-        if((ret = select(loop->max_fd + 1,&read_set,&write_set,NULL,&tv)) < 0){
+        if((ret = select(loop->max_fd + 1,&read_set,&write_set,&error_set,&tv)) < 0){
           if (errno != EINTR) {
-            perror("********************select error************************\n");
-            return -1;
+            printf("****************select error**********************max_fd:%d,sec:%ld,usec:%ld\n",loop->max_fd,tv.tv_sec,tv.tv_usec);
+            print_error_fds(&loop->read_head,&loop->write_head,&error_set); 
+            ret = -1;
+            goto end;
           }
           continue;
         }
@@ -342,11 +371,12 @@ int e_dispatch_event(eloop_t* loop)
         process_timer(loop);
     }
 
+end:
     /*when canceled loop clean hold list*/
     clean_list(&loop->read_head);
     clean_list(&loop->write_head);
     clean_list(&loop->timer_head);
-    return 0;
+    return ret;
 }
 
 void e_dispatch_cancel(eloop_t* loop)
