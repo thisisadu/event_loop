@@ -120,30 +120,6 @@ static void clean_list(struct list_head *head)
     }
 }
 
-static void print_error_fds(struct list_head *r_head,struct list_head *w_head,fd_set *fds)
-{
-  hold_t *h;
-  event_t *e;
-
-  list_for_each_entry(h,r_head,list){
-    if(h->ptr){
-      e = (event_t*)h->ptr;
-      if(FD_ISSET(e->fd,fds)){
-        printf("fd %d error in read set\n",e->fd);
-      }
-    }
-  }
-
-  list_for_each_entry(h,w_head,list){
-    if(h->ptr){
-      e = (event_t*)h->ptr;
-      if(FD_ISSET(e->fd,fds)){
-        printf("fd %d error in write set\n",e->fd);
-      }
-    }
-  }
-}
-
 static void process_fds(struct list_head *rw_head,fd_set *fds,fd_set *origin)
 {
     hold_t *h,*t;
@@ -334,14 +310,12 @@ int e_dispatch_event(eloop_t* loop)
     int ret = 0;
     fd_set read_set;
     fd_set write_set;
-    fd_set error_set;
     struct timeval tv;
 
     loop->runing = 1;
 
     while(loop->runing){
         //assign fds
-        FD_ZERO(&error_set);
         read_set = loop->read_set;
         write_set = loop->write_set;
 
@@ -351,10 +325,9 @@ int e_dispatch_event(eloop_t* loop)
         //pick next expired time
         timer_next(loop,&tv);
         //printf("picked:%d,%d\n",tv.tv_sec,tv.tv_usec);
-        if((ret = select(loop->max_fd + 1,&read_set,&write_set,&error_set,&tv)) < 0){
+        if((ret = select(loop->max_fd + 1,&read_set,&write_set,NULL,&tv)) < 0){
           if (errno != EINTR) {
             printf("****************select error**********************max_fd:%d,sec:%ld,usec:%ld\n",loop->max_fd,tv.tv_sec,tv.tv_usec);
-            print_error_fds(&loop->read_head,&loop->write_head,&error_set); 
             ret = -1;
             goto end;
           }
