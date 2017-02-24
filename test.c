@@ -1,56 +1,51 @@
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include "eloop.h"
 
-eloop_t e_demo; //thread local data
-
-void timer_proc(event_t *evt)
+void timer_proc(eloop_t *loop,event_t *evt,long fd,void* arg)
 {
 	static int count = 0;
+	struct timeval tv;
+	gettimeofday(&tv,NULL);
 
-	printf("count:%d\n",count);
+	printf("count:%d,%d,%d\n",count,tv.tv_sec,tv.tv_usec);
 
-	/*delete timer*/	
-	if(count++ == 10)
-	{
-		e_del_event(&e_demo,evt);
-		e_dispatch_cancel(&e_demo);
-	}
+	/*delete timer*/
+	if(count++ == 10){
+    e_event_del(loop,evt);
+    e_event_free(evt);
+    e_loop_cancel(loop);
+  }
 }
 
-void fd_proc(event_t *evt)
+void fd_proc(eloop_t *loop,event_t *evt,long fd,void* arg)
 {
-	int fd = e_get_event_fd(evt);
-	int *p = (int*)e_get_event_arg(evt);
-	
-	e_del_event(&e_demo,evt);
+	printf("fd_proc\n");
+	e_event_del(loop,evt);
+	e_event_free(evt);
 	close(fd);
 }
 
 
 int main(int argc,char**argv)
 {
-	event_t node;
-	event_t timer;
-	int arg;
+	eloop_t *loop = e_loop_new();
 
-	/*初始化事件循环*/
-	e_init(&e_demo);
+	int fd = socket(AF_INET,SOCK_STREAM,0);
 
-	int fd = socket();
-	e_init_read_event(&node,fd,fd_proc,&arg);
+	event_t *node = e_event_new(E_READ,fd,fd_proc,NULL);
 
-	e_init_timer_event(&timer,3,0,timer_proc,NULL);
+	event_t *timer = e_event_new(E_TIMER,3000,timer_proc,NULL);
 
-	e_add_event(&e_demo,&node);
+	e_event_add(loop,node);
 
-	e_add_event(&e_demo,&timer);
+	e_event_add(loop,timer);
 
-	e_dispatch_event(&e_demo);
+	e_loop_run(loop);
+
+  e_loop_free(loop);
 
 	return 0;
 }
-
-
-
-

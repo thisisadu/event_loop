@@ -1,358 +1,389 @@
-#include <string.h>
+/******************************************************
+ date :  2014/08/09
+ author: duyahui
+******************************************************/
+#include "sys/time.h"
+#include "sys/select.h"
+#include "stdio.h"
+#include "stdlib.h"
+#include "string.h"
+#include "time.h"
+#include "errno.h"
 #include "eloop.h"
+#include "xlist.h"
 
+//select 默认超时时间
+#define DEFAULT_TIMEOUT 300 //ms
+
+//flags
 #define F_TIMER	0x01
 #define F_READ	0x02
 #define F_WRITE	0x04
-#define F_ADD	  0x08
+#define F_ADD	0x08
 
+/*thread local only,each thread should has its own loop*/
+struct tag_loop
+{
+  struct xlist_head timer_head;
+  struct xlist_head read_head;
+  struct xlist_head write_head;
+  fd_set read_set;
+  fd_set write_set;
+  int max_fd;
+  int runing;
+};
+
+//a event represents READ/WRITE/TIMER
+struct tag_event
+{
+  int flag; //flag
+  unsigned int value; //fd or ms
+  unsigned int timeout; //expire use
+  callback_t proc; //callback function
+  void *arg; //point to user data
+  void *ptr; //point to list element
+};
+
+/*
+  list element to hold event_t, add hold_t to list rather than event_t itself
+  make it possiable that when you want to delete other event while in a event callback,
+  becasue the list is in a xlist_for_each looping
+*/
 typedef struct
 {
-    struct list_head list;
-    void *ptr;
-}hold_t;
+  struct xlist_head xlist;
+  void *ptr;
+} hold_t;
 
-//for debug
-#ifdef ELOOP_DEBUG_OPEN
-static void print_count(eloop_t *loop)
+static time_t poweron = 0;
+static time_t uptime_ms()
 {
-  hold_t *h;
-  int timers = 0,read_fds = 0, write_fds = 0;
-
-  list_for_each_entry(h,&loop->timer_head,list){
-      if(h->ptr){
-        timers++;
-      }
-  }
-
-  list_for_each_entry(h,&loop->read_head,list){
-      if(h->ptr){
-        read_fds++;
-      }
-  }
-
-  list_for_each_entry(h,&loop->write_head,list){
-      if(h->ptr){
-        write_fds++;
-      }
-  }
-
-  printf("^^^^^^^^^^^^^^^^^loop:%p,timers:%d,read_fds:%d,write_fds:%d^^^^^^^^^^^^^^^^^^\n",loop,timers,read_fds,write_fds);
+  time_t t;
+  struct timeval tv;
+  if (0 == poweron) poweron = time(NULL);
+  gettimeofday(&tv, NULL);
+  t = (tv.tv_sec - poweron) * 1000 + tv.tv_usec / 1000;
+  return t;
 }
-#endif
 
 static void recalculate_max_fd(eloop_t *loop)
 {
-    hold_t *h;
-    event_t *e;
+  hold_t *h;
+  event_t *e;
 
-    loop->max_fd = 0;
-    list_for_each_entry(h,&loop->read_head,list){
-      if(h->ptr){
-        e = (event_t*)h->ptr;
-        if(e->fd > loop->max_fd)
-          loop->max_fd = e->fd;
-      }
+  loop->max_fd = 0;
+  xlist_for_each_entry(h,&loop->read_head,xlist,hold_t) {
+    if (h->ptr) {
+      e = (event_t*) h->ptr;
+      if (e->value > loop->max_fd)
+        loop->max_fd = e->value;
     }
+  }
 
-    list_for_each_entry(h,&loop->write_head,list){
-      if(h->ptr){
-        e = (event_t*)h->ptr;
-        if(e->fd > loop->max_fd)
-          loop->max_fd = e->fd;
-      }
+  xlist_for_each_entry(h,&loop->write_head,xlist,hold_t) {
+    if (h->ptr) {
+      e = (event_t*) h->ptr;
+      if (e->value > loop->max_fd)
+        loop->max_fd = e->value;
     }
+  }
 }
 
-static void timer_next(eloop_t *loop,struct timeval *tv)
+static void timer_next(eloop_t *loop, struct timeval *tv)
 {
-    hold_t *h;
-    event_t *e,*p = NULL;
-    struct timeval now;
+  hold_t *h;
+  event_t *e, *p = NULL;
+  time_t now = uptime_ms();
 
-    //get first timer
-    list_for_each_entry(h,&loop->timer_head,list){
-      //printf("h->ptr:%p\n",h->ptr);
-      if(h->ptr){
-        p = (event_t*)h->ptr;
-        //printf("%d:%d\n",p->timeout.tv_sec,p->timeout.tv_usec);
-        break;
+  //get first timer
+  xlist_for_each_entry(h,&loop->timer_head,xlist,hold_t) {
+    if (h->ptr) {
+      p = (event_t*) h->ptr;
+      break;
+    }
+  }
+
+  //find minimum timeout timer
+  xlist_for_each_entry(h,&loop->timer_head,xlist,hold_t) {
+    if (h->ptr) {
+      e = (event_t*) h->ptr;
+      if (e->timeout < p->timeout) {
+        p = e;
       }
     }
+  }
 
-    //find minimum timeout timer
-    list_for_each_entry(h,&loop->timer_head,list){
-      if(h->ptr){
-        e = (event_t*)h->ptr;
-        if(timercmp(&e->timeout, &p->timeout,<)){
-          p = e;
-        }
-      }
-    }
+  //if timer xlist is empty,use default tv
+  if (p == NULL) {
+    tv->tv_sec = DEFAULT_TIMEOUT / 1000;
+    tv->tv_usec = (DEFAULT_TIMEOUT % 1000) * 1000;
+    return;
+  }
 
-    //if timer list is empty,use default tv(5S)
-    if(p == NULL){
-      tv->tv_sec = 5;
-      tv->tv_usec = 0;
-    }else{
-      gettimeofday(&now, NULL);
-      if(timercmp(&p->timeout, &now, <=)){
-        timerclear(tv);
-      }else{
-        timersub(&p->timeout, &now, tv);
-      }
-    }
+  //timer p is expired
+  if (p->timeout <= now) {
+    tv->tv_sec = 0;
+    tv->tv_usec = 0;
+  }
+  else {
+    unsigned int tmp = p->timeout - now;
+    tmp = (tmp > DEFAULT_TIMEOUT) ? DEFAULT_TIMEOUT : tmp;
+    tv->tv_sec = tmp / 1000;
+    tv->tv_usec = (tmp % 1000) * 1000;
+  }
 }
 
-static void clean_list(struct list_head *head)
+static void clean_xlist(struct xlist_head *head)
 {
-    hold_t *h,*t;
-    event_t *e;
+  hold_t *h, *t;
+  event_t *e;
 
-    list_for_each_entry_safe(h,t,head,list){
-        if(h->ptr){
-          e = (event_t*)h->ptr;
-          //clear F_ADD flag
-          e->flag &= ~F_ADD;
-        }
-        list_del(&h->list);
-        free(h);
+  xlist_for_each_entry_safe(h,t,head,xlist,hold_t) {
+    if (h->ptr) {
+      e = (event_t*) h->ptr;
+      e->flag &= ~F_ADD; //clear F_ADD flag
     }
+    xlist_del(&h->xlist);
+    free(h);
+  }
 }
 
-static void process_fds(struct list_head *rw_head,fd_set *fds,fd_set *origin)
+static void process_fds(eloop_t *loop, struct xlist_head *rw_head, fd_set *fds, fd_set *origin)
 {
-    hold_t *h,*t;
-    event_t *e;
+  hold_t *h, *t;
+  event_t *e;
 
-    list_for_each_entry_safe(h,t,rw_head,list){
-      /*the hold point to NULL should be delete and free*/
-      if(h->ptr == NULL){
-          list_del(&h->list);
-          free(h);
-          continue;
-      }
-
-      e = (event_t*)h->ptr;
-
-      if(FD_ISSET(e->fd,fds) && FD_ISSET(e->fd,origin)){
-          e->proc(e);
-      }
+  xlist_for_each_entry_safe(h,t,rw_head,xlist,hold_t) {
+    /*the hold point to NULL should be delete and free*/
+    if (h->ptr == NULL) {
+      xlist_del(&h->xlist);
+      free(h);
+      continue;
     }
+
+    e = (event_t*) h->ptr;
+
+    if (FD_ISSET(e->value,fds) && FD_ISSET(e->value, origin)) {
+      e->proc(loop, e, e->value, e->arg);
+    }
+  }
 }
 
 static void process_timer(eloop_t *loop)
 {
-    hold_t *h,*t;
-    event_t *e;
-    struct timeval now,tv;
+  hold_t *h, *t;
+  event_t *e;
+  unsigned int now = uptime_ms();
 
-    gettimeofday(&now, NULL);
+  xlist_for_each_entry_safe(h,t,&loop->timer_head,xlist,hold_t) {
+    /*the hold point to NULL should be delete and free*/
+    if (h->ptr == NULL) {
+      xlist_del(&h->xlist);
+      free(h);
+      continue;
+    }
 
-    list_for_each_entry_safe(h,t,&loop->timer_head,list){
-      /*the hold point to NULL should be delete and free*/
-      if(h->ptr == NULL){
-          list_del(&h->list);
-          free(h);
-          continue;
-      }
+    e = (event_t*) h->ptr;
 
-      e = (event_t*)h->ptr;
+    if (now >= e->timeout) {
+      //proc timer
+      e->proc(loop, e, -1, e->arg);
 
-      if(timercmp(&now,&e->timeout, >=)){
-        //proc timer
-        e->proc(e);
-
-        //h->ptr not null indicates the timer still alive otherwise e is not valid
-        if(h->ptr){
-          //recalculate next expire time
-          tv.tv_sec = e->secs;
-          tv.tv_usec = e->usecs;
-          //printf("%d,%d\n",e->secs,e->usecs);
-          timeradd(&now, &tv, &e->timeout);
-        }
+      //h->ptr not null indicates the timer still alive otherwise e is not valid
+      if (h->ptr) {
+        //recalculate next expiring time
+        e->timeout = now + e->value;
       }
     }
+  }
 }
 
-void e_init_read_event(event_t *e,int fd,callback_t fn,void *arg)
+event_t* e_event_new(int type, long fd_or_ms, callback_t fn, void *arg)
 {
-    e->fd = fd;
-    e->proc = fn;
-    e->arg = arg;
-    e->flag = F_READ;
+  if (fd_or_ms < 0 || !(type == E_READ || type == E_WRITE || type == E_TIMER)) {
+    printf("params error\n");
+    return NULL;
+  }
+
+  event_t *evt = malloc(sizeof(event_t));
+  if (evt == NULL) {
+    printf("malloc error\n");
+    return NULL;
+  }
+
+  memset(evt,0,sizeof(event_t));
+  evt->value = fd_or_ms;
+  evt->proc = fn;
+  evt->arg = arg;
+
+  if (type == E_READ) {
+    evt->flag = F_READ;
+  }
+  else if (type == E_WRITE) {
+    evt->flag = F_WRITE;
+  }
+  else {
+    evt->flag = F_TIMER;
+  }
+
+  return evt;
 }
 
-void e_init_write_event(event_t *e,int fd,callback_t fn,void *arg)
+void e_event_free(event_t *evt)
 {
-    e->fd = fd;
-    e->proc = fn;
-    e->arg = arg;
-    e->flag = F_WRITE;
+  free(evt);
 }
 
-void e_init_timer_event(event_t *e,int secs,int usecs,callback_t fn,void *arg)
+eloop_t* e_loop_new(void)
 {
-    e->secs = secs;
-    e->usecs = usecs;
-    e->proc = fn;
-    e->arg = arg;
-    e->flag = F_TIMER;
+  eloop_t *loop = malloc(sizeof(eloop_t));
+  if (loop == NULL) {
+    printf("malloc error\n");
+    return NULL;
+  }
+
+  memset(loop,0,sizeof(eloop_t));
+  INIT_XLIST_HEAD(&loop->timer_head);
+  INIT_XLIST_HEAD(&loop->read_head);
+  INIT_XLIST_HEAD(&loop->write_head);
+  FD_ZERO(&loop->read_set);
+  FD_ZERO(&loop->write_set);
+  return loop;
 }
 
-int e_get_event_fd(event_t *e)
+void e_loop_free(eloop_t *loop)
 {
-    return e->fd;
+  free(loop);
 }
 
-void* e_get_event_arg(event_t *e)
+void e_event_add(eloop_t* loop, event_t *e)
 {
-    return e->arg;
-}
+  hold_t *h;
 
-void e_init(eloop_t* loop)
-{
-    memset(loop,0,sizeof(*loop));
-    INIT_LIST_HEAD(&loop->timer_head);
-    INIT_LIST_HEAD(&loop->read_head);
-    INIT_LIST_HEAD(&loop->write_head);
-    FD_ZERO(&loop->read_set);/*初始化描述符集*/
-    FD_ZERO(&loop->write_set);/*初始化描述符集*/
-}
+  //alread added,return
+  if (e->flag & F_ADD) {
+    printf("alread added\n");
+    return;
+  }
 
-void e_add_event(eloop_t* loop,event_t *e)
-{
-    hold_t *h;
+  h = malloc(sizeof(hold_t));
+  if (h == NULL) {
+    printf("malloc error\n");
+    return;
+  }
 
-    //alread added,return
-    if(e->flag & F_ADD){
-      printf("alread added\n");
-      return;
+  //point to each other
+  h->ptr = e;
+  e->ptr = h;
+
+  if (e->flag & F_TIMER) {
+    //caculate next expire time
+    unsigned int now = uptime_ms();
+    e->timeout = now + e->value;
+    xlist_add(&h->xlist, &loop->timer_head);
+  }
+  else {
+    if (e->value > loop->max_fd) {
+      loop->max_fd = e->value;
     }
 
-    h = malloc(sizeof(hold_t));
-    if(h == NULL)
-    {
-        printf("malloc error");
-        return;
+    if (e->flag & F_READ) {
+      FD_SET(e->value, &loop->read_set);
+      xlist_add(&h->xlist, &loop->read_head);
     }
+    else {
+      FD_SET(e->value, &loop->write_set);
+      xlist_add(&h->xlist, &loop->write_head);
+    }
+  }
 
-    //point to each other
-    h->ptr = e;
-    e->ptr = h;
+  e->flag |= F_ADD;
+}
 
-    if(e->flag & F_TIMER){
-        //caculate next expire time
-        struct timeval now,tv;
-        tv.tv_sec = e->secs;
-        tv.tv_usec = e->usecs;
-        gettimeofday(&now, NULL);
-        timeradd(&now, &tv, &e->timeout);
-        //add to hold list
-        list_add(&h->list,&loop->timer_head);
-    }else{
-      if(e->fd > loop->max_fd){
-        loop->max_fd = e->fd;
+void e_event_del(eloop_t* loop, event_t *e)
+{
+  hold_t *h;
+
+  //never added,return
+  if (!(e->flag & F_ADD)) {
+    printf("never added\n");
+    return;
+  }
+
+  //detach from hold
+  h = (hold_t*) e->ptr;
+  h->ptr = NULL;
+
+  if (e->flag & F_READ) {
+    FD_CLR(e->value, &loop->read_set);
+    recalculate_max_fd(loop);
+  }
+  else if (e->flag & F_WRITE) {
+    FD_CLR(e->value, &loop->write_set);
+    recalculate_max_fd(loop);
+  }
+
+  //clear F_ADD flag
+  e->flag &= ~F_ADD;
+}
+
+void e_event_mod(eloop_t* loop, event_t *e, long ms)
+{
+  e->value = ms;
+
+  //if the timer is alread added, delete it and add again
+  if (e->flag & F_ADD) {
+    e_event_del(loop, e);
+    e_event_add(loop, e);
+  }
+}
+
+int e_loop_run(eloop_t* loop)
+{
+  int ret = 0;
+  fd_set read_set;
+  fd_set write_set;
+  struct timeval tv;
+
+  loop->runing = 1;
+
+  while (loop->runing) {
+    //assign fds
+    read_set = loop->read_set;
+    write_set = loop->write_set;
+
+    //pick next expired time
+    timer_next(loop, &tv);
+
+    //printf("picked:%d,%d\n",tv.tv_sec,tv.tv_usec);
+    if ((ret = select(loop->max_fd + 1, &read_set, &write_set, NULL,&tv)) < 0){
+      if(errno != EINTR){
+        printf("****************select error**********************\n");
+        printf("max_fd:%d,sec:%ld,usec:%ld\n",loop->max_fd,tv.tv_sec,tv.tv_usec);
+        goto end;
       }
-
-      if(e->flag & F_READ){
-        FD_SET(e->fd,&loop->read_set);
-        list_add(&h->list,&loop->read_head);
-      }else{
-        FD_SET(e->fd,&loop->write_set);
-        list_add(&h->list,&loop->write_head);
-      }
+      continue;
     }
 
-    e->flag |= F_ADD;
+    //Test read fds
+    process_fds(loop, &loop->read_head, &read_set, &loop->read_set);
+
+    //Test write fds
+    process_fds(loop, &loop->write_head, &write_set, &loop->write_set);
+
+    //Test timer
+    process_timer(loop);
+  }
+
+ end:
+  /*when canceled loop clean hold xlist*/
+  clean_xlist(&loop->read_head);
+  clean_xlist(&loop->write_head);
+  clean_xlist(&loop->timer_head);
+  return ret;
 }
 
-void e_del_event(eloop_t* loop,event_t *e)
+void e_loop_cancel(eloop_t* loop)
 {
-    hold_t *h;
-
-    //never added,return
-    if(!(e->flag & F_ADD)){
-      printf("never added\n");
-      return;
-    }
-
-    //detach from hold
-    h = (hold_t*)e->ptr;
-    h->ptr = NULL;
-
-    if(e->flag & F_READ){
-      FD_CLR(e->fd,&loop->read_set);
-      recalculate_max_fd(loop);
-    }else if(e->flag & F_WRITE){
-      FD_CLR(e->fd,&loop->write_set);
-      recalculate_max_fd(loop);
-    }
-
-    //clear F_ADD flag
-    e->flag &= ~F_ADD;
-}
-
-void e_mod_timer_event(eloop_t* loop,event_t *e,int secs,int usecs)
-{
-    e->secs = secs;
-    e->usecs = usecs;
-
-    //if the timer is alread added, delete it and add again
-    if(e->flag & F_ADD){
-      e_del_event(loop,e);
-      e_add_event(loop,e);
-    }
-}
-
-int e_dispatch_event(eloop_t* loop)
-{
-    int ret = 0;
-    fd_set read_set;
-    fd_set write_set;
-    struct timeval tv;
-
-    loop->runing = 1;
-
-    while(loop->runing){
-        //assign fds
-        read_set = loop->read_set;
-        write_set = loop->write_set;
-
-#ifdef ELOOP_DEBUG_OPEN
-        print_count(loop);
-#endif
-        //pick next expired time
-        timer_next(loop,&tv);
-        //printf("picked:%d,%d\n",tv.tv_sec,tv.tv_usec);
-        if((ret = select(loop->max_fd + 1,&read_set,&write_set,NULL,&tv)) < 0){
-          if (errno != EINTR) {
-            printf("****************select error**********************max_fd:%d,sec:%ld,usec:%ld\n",loop->max_fd,tv.tv_sec,tv.tv_usec);
-            ret = -1;
-            goto end;
-          }
-          continue;
-        }
-
-        //Test read fds
-        process_fds(&loop->read_head,&read_set,&loop->read_set);
-
-        //Test write fds
-        process_fds(&loop->write_head,&write_set,&loop->write_set);
-
-        //Test timer
-        process_timer(loop);
-    }
-
-end:
-    /*when canceled loop clean hold list*/
-    clean_list(&loop->read_head);
-    clean_list(&loop->write_head);
-    clean_list(&loop->timer_head);
-    return ret;
-}
-
-void e_dispatch_cancel(eloop_t* loop)
-{
-    loop->runing = 0;
+  loop->runing = 0;
 }

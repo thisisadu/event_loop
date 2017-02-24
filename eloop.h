@@ -1,64 +1,88 @@
 #ifndef __ELOOP__
 #define __ELOOP__
-#include <stdlib.h>
-#include <stdio.h>
-#include <sys/time.h>
-#include <sys/select.h>
-#include <time.h>
-#include <errno.h>
-#include "xlist.h"
 
-//#define ELOOP_DEBUG_OPEN 1
+/*
+handle of a loop
+*/
+typedef struct tag_loop eloop_t;
 
-/*事件循环，每个线程定义一个*/
-typedef struct
-{
-  struct list_head timer_head;
-  struct list_head read_head;
-  struct list_head write_head;
-  fd_set read_set;
-  fd_set write_set;
-  int max_fd;
-  int runing;
-}eloop_t;
-
+/*
+handle of a event
+*/
 typedef struct tag_event event_t;
 
-typedef void (*callback_t)(event_t *evt);
+/*
+callback funtion for events
+@loop: the loop the event attached
+@evt: the event itself who happened things
+@fd:  when the event is read or write event,this is the fd,when the evt is a timer,fd equals -1
+@arg: the extra data for evt
+ */
+typedef void (*callback_t)(eloop_t *loop,event_t *evt,long fd,void *arg);
 
-//该结构体字段仅内部用，不要直接访问
-struct tag_event
-{
-    int flag;//flag
-    int fd;//fd
-    int secs;//seconds
-    int usecs;//useconds
-    struct timeval timeout;//expire use
-    callback_t proc;//callback function
-    void *arg;//point to user data
-    void *ptr;//point to list element
+/*
+type for e_event_new
+*/
+enum{
+  E_READ,
+  E_WRITE,
+  E_TIMER
 };
 
-void e_init_read_event(event_t *evt,int fd,callback_t fn,void *arg);
+/*
+create a new loop handle
+*/
+eloop_t* e_loop_new(void);
 
-void e_init_write_event(event_t *evt,int fd,callback_t fn,void *arg);
+/*
+free a loop handle
+*/
+void e_loop_free(eloop_t *loop);
 
-void e_init_timer_event(event_t *evt,int secs,int usecs,callback_t fn,void *arg);
+/*
+when call this funtion,the thread will goes into a loop,
+when you want to stop the loop,you can call e_loop_cancel
+in a event callback or in another thread
+*/
+int  e_loop_run(eloop_t* loop);
 
-void* e_get_event_arg(event_t *evt);
+/*
+stop a loop's running,this is the only routine
+that can be called in another thread
+*/
+void e_loop_cancel(eloop_t* loop);
 
-int  e_get_event_fd(event_t *evt);
+/*
+create a event with params
+@type: E_READ/E_WRITE/E_TIMER
+@fd_or_ms: the fd for a read or write event,or the interval(ms) for a timer event
+@fn: the callback function for a event
+@arg: extra data for user,it will pass to the event callback
+*/
+event_t* e_event_new(int type,long fd_or_ms,callback_t fn,void *arg);
 
-void e_init(eloop_t* loop);
+/*
+free a event handle,remember when you added a event to loop,
+you must call e_event_del before call e_event_free
+*/
+void e_event_free(event_t *evt);
 
-void e_mod_timer_event(eloop_t* loop,event_t *evt,int secs,int usecs);
+/*
+add a event to a loop,
+this can be called no matter the loop is running or not
+*/
+void e_event_add(eloop_t* loop,event_t *evt);
 
-void e_add_event(eloop_t* loop,event_t *evt);
+/*
+delete a event from a loop,
+this can be called no matter the loop is running or not
+*/
+void e_event_del(eloop_t* loop,event_t *evt);
 
-void e_del_event(eloop_t* loop,event_t *evt);
-
-int  e_dispatch_event(eloop_t* loop);
-
-void e_dispatch_cancel(eloop_t* loop);
+/*
+when you want to modify the expiring time of a timer, this function
+can be called no matter the loop is runing or not,evt must be a timer event
+*/
+void e_event_mod(eloop_t* loop,event_t *evt,long ms);
 
 #endif//__ELOOP__
